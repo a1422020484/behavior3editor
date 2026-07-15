@@ -98,7 +98,7 @@ gulp.task('_vendor_fonts', function() {
              .pipe(gulp.dest('build/fonts'))
 });
 
-gulp.task('_vendor', ['_vendor_js', '_vendor_css', '_vendor_fonts']);
+gulp.task('_vendor', gulp.parallel('_vendor_js', '_vendor_css', '_vendor_fonts'));
 
 
 // TASKS (PRELOAD) ============================================================
@@ -118,7 +118,7 @@ gulp.task('_preload_css', function() {
              .pipe(connect.reload())
 });
 
-gulp.task('_preload', ['_preload_js', '_preload_css']);
+gulp.task('_preload', gulp.parallel('_preload_js', '_preload_css'));
 
 
 // TASKS (APP) ================================================================
@@ -163,7 +163,12 @@ gulp.task('_app_html', function() {
              .pipe(minifyHTML({empty:true}))
              .pipe(replace('[BUILD_VERSION]', build_version))
              .pipe(replace('[BUILD_DATE]', build_date))
-             .pipe(templateCache('templates.min.js', {standalone:true}))
+             .pipe(templateCache('templates.min.js', {
+               standalone: true,
+               transformUrl: function(url) {
+                 return url.replace(/^[\\/]+/, '');
+               }
+             }))
              .pipe(gulp.dest('build/js'))
              .pipe(connect.reload())
 });
@@ -173,24 +178,40 @@ gulp.task('_app_entry', function() {
              // .pipe(minifyHTML({empty:true})) 
              .pipe(replace('[BUILD_VERSION]', build_version))
              .pipe(replace('[BUILD_DATE]', build_date))
+             .pipe(replace('[DEBUG_MODE]', 'false'))
              .pipe(gulp.dest('build'))
              .pipe(connect.reload())
 });
 
-gulp.task('_app_dev', [
+gulp.task('_app_entry_debug', function() {
+  return gulp.src(app_entry)
+             .pipe(replace('[BUILD_VERSION]', build_version))
+             .pipe(replace('[BUILD_DATE]', build_date))
+             .pipe(replace('[DEBUG_MODE]', 'true'))
+             .pipe(gulp.dest('build'));
+});
+
+gulp.task('_app_dev', gulp.parallel(
   '_app_js_dev',
   '_app_less',
   '_app_imgs',
   '_app_html',
   '_app_entry'
-]);
-gulp.task('_app_build', [
+));
+gulp.task('_app_build', gulp.parallel(
   '_app_js_build',
   '_app_less',
   '_app_imgs',
   '_app_html',
   '_app_entry'
-]);
+));
+gulp.task('_app_debug', gulp.parallel(
+  '_app_js_dev',
+  '_app_less',
+  '_app_imgs',
+  '_app_html',
+  '_app_entry_debug'
+));
 
 
 // TASKS (LIVE RELOAD) ========================================================
@@ -202,18 +223,26 @@ gulp.task('_livereload', function() {
   });
 });
 
-gulp.task('_watch', ['_livereload'], function() {
-  gulp.watch(preload_js, ['_preload_js']);
-  gulp.watch(preload_css, ['_preload_css']);
-  gulp.watch(app_js, ['_app_js_dev']);
-  gulp.watch(app_less, ['_app_less']);
-  gulp.watch(app_html, ['_app_html']);
-  gulp.watch(app_entry, ['_app_entry']);
-});
+gulp.task('_watch', gulp.series('_livereload', function watchFiles() {
+  gulp.watch(preload_js, gulp.series('_preload_js'));
+  gulp.watch(preload_css, gulp.series('_preload_css'));
+  gulp.watch(app_js, gulp.series('_app_js_dev'));
+  gulp.watch(app_less, gulp.series('_app_less'));
+  gulp.watch(app_html, gulp.series('_app_html'));
+  gulp.watch(app_entry, gulp.series('_app_entry'));
+}));
+
+// COMMANDS ===================================================================
+// Gulp 4 resolves task names when series/parallel is declared, so these base
+// commands must be registered before the packaging tasks reference `build`.
+gulp.task('build', gulp.parallel('_vendor', '_preload', '_app_build'));
+gulp.task('dev', gulp.parallel('_vendor', '_preload', '_app_dev'));
+gulp.task('debug', gulp.parallel('_vendor', '_preload', '_app_debug'));
+gulp.task('serve', gulp.series('dev', '_watch'));
 
 
 // TASKS (NODE WEBKIT) ========================================================
-gulp.task('_electron', ['build'], function(cb) {
+gulp.task('_electron', gulp.series('build', function packageElectron(cb) {
   packager({
     dir       : 'build',
     out       : '.temp-dist',
@@ -226,21 +255,54 @@ gulp.task('_electron', ['build'], function(cb) {
   }, function done(err, appPath) {
     cb(err);
   })
-});
+}));
 
-gulp.task('_electron_zip', ['_electron'], function() {
-  return gulp.src('.temp-dist/*')
-             .pipe(foreach(function(stream, file) {
-                var fileName = file.path.substr(file.path.lastIndexOf("/")+1);
-                gulp.src('.temp-dist/'+fileName+'/**/*')
-                    .pipe(zip(fileName+'.zip'))
-                    .pipe(gulp.dest('./dist'));
-                return stream;
-             }));
-});
+gulp.task('_electron_zip', gulp.series('_electron', function zipElectron() {
+  var streams = fs.readdirSync('.temp-dist')
+    .filter(function(fileName) {
+      return fs.statSync('.temp-dist/'+fileName).isDirectory();
+    })
+    .map(function(fileName) {
+      return gulp.src('.temp-dist/'+fileName+'/**/*', {
+        base: '.temp-dist/'+fileName
+      })
+      .pipe(zip(fileName+'.zip'))
+      .pipe(gulp.dest('./dist'));
+    });
 
-// COMMANDS ===================================================================
-gulp.task('build', ['_vendor', '_preload', '_app_build']);
-gulp.task('dev',   ['_vendor', '_preload', '_app_dev']);
-gulp.task('serve', ['_vendor', '_preload', '_app_dev', '_watch']);
-gulp.task('dist',  ['_electron_zip']);
+  return merge.apply(null, streams);
+}));
+
+gulp.task('_electron_debug', gulp.series('debug', function packageElectronDebug(cb) {
+  packager({
+    dir       : 'build',
+    out       : '.temp-debug-dist',
+    name      : project.name+'-debug',
+    platform  : 'win32',
+    arch      : 'x64',
+    version   : '0.34.2',
+    overwrite : true,
+    asar      : true
+  }, function done(err, appPath) {
+    cb(err);
+  });
+}));
+
+gulp.task('_electron_debug_zip', gulp.series('_electron_debug', function zipElectronDebug() {
+  var streams = fs.readdirSync('.temp-debug-dist')
+    .filter(function(fileName) {
+      return fs.statSync('.temp-debug-dist/'+fileName).isDirectory();
+    })
+    .map(function(fileName) {
+      return gulp.src('.temp-debug-dist/'+fileName+'/**/*', {
+        base: '.temp-debug-dist/'+fileName
+      })
+      .pipe(zip(fileName+'.zip'))
+      .pipe(gulp.dest('./dist-debug'));
+    });
+
+  return merge.apply(null, streams);
+}));
+
+gulp.task('dist', gulp.series('_electron_zip'));
+gulp.task('dist-debug', gulp.series('_electron_debug_zip'));

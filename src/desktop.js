@@ -1,5 +1,12 @@
 var app = require('app');  // Module to control application life.
 var BrowserWindow = require('browser-window');  // Module to create native browser window.
+var DEBUG_MODE = '[DEBUG_MODE]' === 'true';
+
+if (DEBUG_MODE) {
+  process.on('uncaughtException', function(error) {
+    console.error('[main uncaught exception]', error && error.stack || error);
+  });
+}
 
 // Report crashes to our server.
 require('crash-reporter').start();
@@ -26,8 +33,18 @@ app.on('ready', function() {
   // and load the index.html of the app.
   mainWindow.loadUrl('file://' + __dirname + '/index.html');
 
-  // Open the DevTools.
-  // mainWindow.openDevTools();
+  if (DEBUG_MODE) {
+    mainWindow.webContents.on('did-fail-load', function(event, errorCode, errorDescription, validatedURL) {
+      console.error('[renderer load failed]', errorCode, errorDescription, validatedURL);
+    });
+    mainWindow.webContents.on('crashed', function() {
+      console.error('[renderer crashed]');
+    });
+    mainWindow.webContents.on('console-message', function(event, level, message, line, sourceId) {
+      console.log('[renderer console]', level, sourceId + ':' + line, message);
+    });
+    mainWindow.openDevTools();
+  }
 
   // Emitted when the window is closed.
   mainWindow.on('closed', function() {
